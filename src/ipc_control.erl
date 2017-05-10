@@ -8,7 +8,7 @@
 %%%-------------------------------------------------------------------
 -module(ipc_control).
 -author("zhuchaodi").
-
+-include("mlogs.hrl").
 %% API
 -compile(export_all).
 
@@ -18,7 +18,7 @@ kick_user_by_name(Pid, UserName) ->
 
 kick_user(Pid, Reason) ->
 	gen_server:cast(Pid, {kick_user, Reason}).
-	%Pid ! {kick_user_by_socket, Socket}.
+%Pid ! {kick_user_by_socket, Socket}.
 
 offline_to_msg(UserListPid, Socket) ->
 	UserListPid ! {offline, Socket}.
@@ -58,13 +58,26 @@ send_msg_to_msg(UserListPid, Socket, Bin)->
 	UserListPid!{send_msg, Socket, binary_to_term(Bin)}.
 
 %心跳接受请求后响应
-heart_beat_info(Socket, Cnt) ->
-	case Cnt >= 5 of 
+heart_beat_info(undefined, Socket, Cnt) ->
+	?LOGINFO("[ipc_control] undefined heart_beat_info~n"),
+	case Cnt >= 5 of
 		true ->
-			ipc_control:offline_to_msg(server_userlist, Socket);
+			socket_closed;
+		_ ->
+			gen_tcp:send(Socket, term_to_binary({heart_beat_ack, Cnt+1})),
+			ok
+	end;
+%心跳接受请求后响应
+heart_beat_info(ServerPid, Socket, Cnt) ->
+	?LOGINFO("[ipc_control] ServerPid[~p] heart_beat_info~n", [ServerPid]),
+
+	case Cnt >= 5 of
+		true ->
+			ipc_control:offline_to_msg(ServerPid, Socket);
 		_ ->
 			gen_tcp:send(Socket, term_to_binary({heart_beat_ack, Cnt+1}))
-	end.
+	end,
+	ok.
 
 %用户被踢后响应
 kick_user_ack(Socket, Reason) ->
@@ -81,10 +94,10 @@ kick_success(UserName) ->
 insert_time_stamp(LimitList) ->
 	{MegaSecs, Secs, _} = erlang:timestamp(),
 	TimeStamp = MegaSecs * 1000000 + Secs,
-	if 
+	if
 		length(LimitList) > 50 ->
 			[Last | Tail] = LimitList,
-			if 
+			if
 				TimeStamp - Last > 60 ->
 					NextLimitList = lists:reverse([TimeStamp| lists:reverse(Tail)]),
 					{ok, NextLimitList};
@@ -96,3 +109,24 @@ insert_time_stamp(LimitList) ->
 			NextLimitList = lists:reverse([TimeStamp|lists:reverse(LimitList)]),
 			{ok, NextLimitList}
 	end.
+
+%server_userlist之间传递消息提示{ServerIndex, ServerPid}<-ServerUserList
+rpc_world_chat_msg(ServerUserList, SelfServerIndex, NewWorldChatRecordIndex) ->
+
+	[gen_server:cast(ServerPid, {rpc_world_chat_record, NewWorldChatRecordIndex})
+		|| {ServerIndex, ServerPid}<-ServerUserList, ServerIndex=/=SelfServerIndex].
+
+
+%server_userlist之间传递消息提示{ServerIndex, ServerPid}<-ServerUserList
+rpc_private_chat_msg(ServerUserList, SelfServerIndex, NewPrivateChatRecordIndex) ->
+
+	[gen_server:cast(ServerPid, {rpc_private_chat_record, NewPrivateChatRecordIndex})
+		|| {ServerIndex, ServerPid}<-ServerUserList, ServerIndex=/=SelfServerIndex].
+
+
+%server_userlist之间传递消息提示{ServerIndex, ServerPid}<-ServerUserList
+rpc_group_chat_msg(ServerUserList, SelfServerIndex, GroupId, NewGroupChatRecordIndex) ->
+
+	[gen_server:cast(ServerPid, {rpc_group_chat_record, GroupId, NewGroupChatRecordIndex})
+		|| {ServerIndex, ServerPid}<-ServerUserList, ServerIndex=/=SelfServerIndex].
+

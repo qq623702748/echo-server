@@ -10,7 +10,7 @@
 %% API functions
 %% ====================================================================
 -export([start_child/1]).
-
+-include("mlogs.hrl").
 
 
 %% ====================================================================
@@ -20,7 +20,7 @@
 %% init/1
 %% ====================================================================
 init([]) ->
-	io:format("server_socket_sup init ...~n"),
+	?LOGINFO("[server_socket_sup] init ...~n"),
    {ok,
 		{ {simple_one_for_one, 0, 1},
 			[
@@ -40,6 +40,6 @@ init([]) ->
 %% Internal functions
 %% ====================================================================
 start_child(Socket) ->
- 	io:format("server_socket_sup start_child ~n"),
+ 	?LOGINFO("[server_socket_sup] start_child ~n"),
 	supervisor:start_child(server_socket_sup, [Socket]).
 

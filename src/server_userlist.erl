@@ -12,7 +12,7 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/0]).
+-export([start_link/1]).
 -include("table_name_def.hrl").
 %% gen_server callbacks
 -export([init/1,
@@ -23,6 +23,8 @@
 	code_change/3]).
 
 -export([%init_group/0,
+		rpc_handle_msg_sendto/2,
+		rpc_msg_groupto/3,
 		 handle_msg_kick_user/2,
 		 handle_msg_online_check/1,
 		 handle_msg_groupto/4,
@@ -46,40 +48,44 @@
 		find_username_by_user/2,
 		find_username_by_socket/2,
 		send_online_info/2,
-		send_online_user_msg/4,
-		send_group_user_msg/5,
+		send_online_user_msg/3,
+		send_group_user_msg/4,
 		server_send_user_msg/2,
 		send_user_msg/2,
 		remove_socket/3]).
 
 -define(SERVER, ?MODULE).
-
--record(state, {tablename, userlist=[], chat_record_count}).
+-include("mlogs.hrl").
+-include("common.hrl").
+-record(state, {userlist=[],
+	world_chat_record_index,
+	private_chat_record_index,
+	group_chat_record_index,
+	serverindex}).
 %%%===================================================================
 %%% API
 %%%===================================================================
 
-start_link() ->
+start_link(ServerIndex) ->
 	process_flag(trap_exit,true),
-	io:format("server_userlist process start_link ...~n"),
-	gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+	?LOGINFO("[server_userlist] process start_link ...~n"),
+	gen_server:start_link(?MODULE, [ServerIndex], []).
 
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
 
-init([]) ->
-	db_control:init(),
-	TableName = ets_control:create_user_info_ets(),
-
-	io:format("[info] server_userlist init TableName:~p ...~n", [TableName]),
-	ChatRecordCount = db_control:get_chat_record_size(),
-	{ok, #state{tablename = TableName,
-
-		chat_record_count = ChatRecordCount}}.
+init([ServerIndex]) ->
+	%db_control:init(), 将由server_userlist_sup启动
+	ets_control:add_new_server_userlist_mapper(ServerIndex, self()),
+	db_control:wait_for_tables(),
+	WorldChatRecordCountIndex = db_control:get_chat_record_size(),
+	ets_control:insert_msg_queue_record(?WORLD_CHAT_BLACKBOARD, ServerIndex, WorldChatRecordCountIndex),
+	ets_control:insert_msg_queue_record(?PRIVATE_CHAT_BLACKBOARD, ServerIndex, 0),
+	{ok, #state{world_chat_record_index = WorldChatRecordCountIndex, private_chat_record_index = 0, serverindex = ServerIndex, group_chat_record_index = 0}}.
 
 handle_call(Request, _From, State) ->
-	io:format("userlist handle_call start... Request:~p~n",[Request]),
+	?LOGINFO("[server_userlist] handle_call start... Request:~p~n",[Request]),
 	{reply, ok, State}.
 %处理服务器提交请求业务
 handle_cast({kick_user, UserName}, State) ->
@@ -89,10 +95,41 @@ handle_cast({online_check}, State) ->
 	%io:format("recv server_control online_check~n"),
 	handle_msg_online_check(State),
 	{noreply, State};
+handle_cast(get_process_info, State) ->
+	?LOGINFO("[server_userlist] get_process_info~n~p~n", [erlang:process_info(self())]),
+	{noreply, State};
+
+%rpc_world_chat_record在ipc_control中定义，用于进程间通知消息已存储到ets中
+handle_cast({rpc_world_chat_record, NewWorldChatRecordIndex},
+			#state{world_chat_record_index = WorldChatRecordIndex,
+					serverindex = ServerIndex} = State) ->
+	%遍历从ChatRecordIndex到UpdateChatRecordIndex所有信息，并转发给用户
+	?TRACE("[server_userlist] rpc_world_chat_record NewWorldChatRecordIndex[~p]~n", [NewWorldChatRecordIndex]),
+	send_online_user_msg(WorldChatRecordIndex, NewWorldChatRecordIndex, State),
+	ets_control:insert_msg_queue_record(?WORLD_CHAT_BLACKBOARD, ServerIndex, NewWorldChatRecordIndex),
+	{noreply, State#state{world_chat_record_index = NewWorldChatRecordIndex}};
+
+%rpc_private_chat_record在ipc_control中定义，用于进程间通知消息已存储到ets中
+handle_cast({rpc_private_chat_record, NewPrivateChatRecordIndex},
+	#state{serverindex = ServerIndex, private_chat_record_index = PIdx} = State) ->
+	%遍历从ChatRecordIndex到UpdateChatRecordIndex所有信息，并转发给用户
+	?TRACE("[server_usrelist][~p] recv rpc_private_chat_record[~p][~p]~n", [ServerIndex, NewPrivateChatRecordIndex, PIdx]),
+	rpc_handle_msg_sendto(NewPrivateChatRecordIndex, State),
+	ets_control:insert_msg_queue_record(?WORLD_CHAT_BLACKBOARD, ServerIndex, NewPrivateChatRecordIndex),
+	{noreply, State#state{private_chat_record_index = NewPrivateChatRecordIndex}};
+
+%rpc_group_chat_record在ipc_control中定义，用于进程间通知消息已存储到ets中
+handle_cast({rpc_group_chat_record, GroupId, NewGroupChatRecordIndex},
+	#state{serverindex = ServerIndex,group_chat_record_index = GrouopChatRecordIndex} = State) ->
+	%遍历从ChatRecordIndex到UpdateChatRecordIndex所有信息，并转发给用户
+	?TRACE("recv rpc group chat record[~p] NewIndex:[~p] Index:[~p]~n", [ServerIndex, NewGroupChatRecordIndex, GrouopChatRecordIndex]),
+	rpc_msg_groupto(NewGroupChatRecordIndex, GroupId, State),
+	ets_control:insert_msg_queue_record(?GROUP_CHAT_BLACKBOARD, ServerIndex, NewGroupChatRecordIndex),
+	{noreply, State#state{group_chat_record_index = NewGroupChatRecordIndex}};
 
 %处理各个server_socket返回的tcp数据
 handle_cast({SocketPid, Socket, Data}, State) ->
-	io:format("server_userlist handle_cast State:[~p]~n", [State]),
+	?LOGINFO("[server_userlist] handle_cast State:[~p]~n", [State]),
 	NewState = 
 		case Data of
 		{login, UserName, PassWord}->
@@ -112,22 +149,22 @@ handle_cast({SocketPid, Socket, Data}, State) ->
 		get_world_chat_record ->
 			handle_msg_get_world_chat_record(Socket, State);
 		_ ->
-			io:format("recv peer socket data:~p~n", [Data])
+			?LOGINFO("[server_userlist] recv peer socket data:~p~n", [Data])
 	end,
 	%mnesia:
-	io:format("server_userlist NewState:[~p]~n", [NewState]),
+	?LOGINFO("[server_userlist] NewState:[~p]~n", [NewState]),
 	{noreply, NewState};
 handle_cast({offline, Socket}, State) ->
-	io:format("user loffline!~n"),
+	?LOGINFO("[server_userlist] user loffline!~n"),
 	NewState = handle_msg_offline(Socket, State),
 	{noreply, NewState}.
 
 handle_info(_Info, State) ->
-	io:format("userlist info... ~n"),
+	?LOGINFO("[server_userlist] info... ~n"),
 	{noreply, State}.
 
 terminate(_Reason, _State) ->
-	io:format("userlist terminate... ~n"),
+	?LOGINFO("[server_userlist] terminate... ~n"),
 	ok.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -160,29 +197,59 @@ handle_msg_kick_user(UserName, #state{userlist = UserList} = State) ->
 			server_send_user_msg(Socket, "server has kick you!"),
 			ipc_control:kick_user(Pid, "server active kick you"),
 			ipc_control:kick_success(UserName),
-			io:format("kick_user_success~n"),
+			?LOGINFO("[server_userlist] kick_user_success~n"),
 			OnlineList = remove_socket(UserList, Socket, UserName),
-			io:format("remove_socket success OnlineList:~p~n", [OnlineList]),
+			?LOGINFO("[server_userlist] remove_socket success OnlineList:~p~n", [OnlineList]),
 			State#state{userlist = OnlineList}
 	end,
-	io:format("NewState:~p~n", [NewState]),
+	?LOGINFO("[server_userlist] NewState:~p~n", [NewState]),
 	NewState.
-handle_msg_online_check(#state{userlist = UserList} = State) ->
-	gen_server:cast(server_control, {online_check_ack, length(UserList)}),
+handle_msg_online_check(#state{userlist = UserList, serverindex = ServerIndex} = State) ->
+	gen_server:cast(server_control, {online_check_ack, ServerIndex, length(UserList)}),
 	State.
 
-handle_msg_groupto(Socket, GroupId, Word, #state{userlist = UserList} = State) ->
+rpc_msg_groupto(GPNewIndex, GroupId,
+	#state{userlist = UserList, serverindex = ServerIndex, group_chat_record_index = GPIndex} = State)
+							when GPIndex < GPNewIndex->
 	GroupInfo = db_control:select_group_info_by_groupid(GroupId),
 	case GroupInfo of
+		{grouop_empty} -> ok;
+		_->
+			GroupUserNameList = GroupInfo#group_info_p.gp_userlist,
+			GroupTitle = GroupInfo#group_info_p.gp_title,
+			GroupSocketList = get_group_socket(GroupUserNameList, UserList),
+			?TRACE("[server_userlist][~p] GroupUserList[~p]~n", [ServerIndex, GroupUserNameList]),
+			case ets_control:get_group_chat_record_single(GPIndex + 1) of
+				[{Id, GroupId, UserName, Word}] ->
+					send_group_user_msg(GroupSocketList, GroupTitle, UserName, Word);
+				_->ok
+			end,
+			rpc_msg_groupto(GPNewIndex, GroupId, State#state{group_chat_record_index = GPIndex + 1})
+	end;
+
+rpc_msg_groupto(_GPNewIndex, _GroupId, _State) ->ok.
+
+
+
+handle_msg_groupto(Socket, GroupId, Word, #state{userlist = UserList, serverindex = ServerIndex} = State) ->
+	GroupInfo = db_control:select_group_info_by_groupid(GroupId),
+	NewIndex =
+		case GroupInfo of
 		{grouop_empty} -> [];
 		_->
 			UserName = find_username_by_socket(UserList, Socket),
 			GroupUserNameList = GroupInfo#group_info_p.gp_userlist,
 			GroupTitle = GroupInfo#group_info_p.gp_title,
 			GroupSocketList = get_group_socket(GroupUserNameList, UserList),
-			send_group_user_msg(GroupSocketList, Socket, GroupTitle, UserName, Word)
+			send_group_user_msg(GroupSocketList, GroupTitle, UserName, Word),
+			ServerUserList = ets_control:get_whole_server_userlist(),
+			Id = ets_control:insert_group_chat_record(UserName, GroupId, Word),
+			ipc_control:rpc_group_chat_msg(ServerUserList, ServerIndex, GroupId, Id),
+			ets_control:insert_msg_queue_record(?GROUP_CHAT_BLACKBOARD,ServerIndex, Id),
+			Id
 	end,
-	State.
+	State#state{group_chat_record_index = NewIndex}.
+
 handle_msg_leave_group(Socket, GroupId, #state{userlist = UserList} = State)->
 	UserName = find_username_by_socket(UserList, Socket),
 	GroupInfo = db_control:select_group_info_by_groupid(GroupId),
@@ -205,7 +272,7 @@ handle_msg_enter_group(Socket, GroupId, #state{userlist = UserList} = State)->
 	UserName = find_username_by_socket(UserList, Socket),
 	%GroupInfo = get_group_Info(GroupList, GroupId),
 	GroupInfo = db_control:select_group_info_by_groupid(GroupId),
-	io:format("[server_userlist] [info] GroupInfo:~p~n", [GroupInfo]),
+	?LOGINFO("[server_userlist] GroupInfo:~p~n", [GroupInfo]),
 	NewState = 
 	case length(check_group_user(GroupInfo, UserName)) of
 		0 ->
@@ -220,19 +287,51 @@ handle_msg_enter_group(Socket, GroupId, #state{userlist = UserList} = State)->
 			State
 	end,
 	NewState.
-handle_msg_sendto(Socket, DestUser, Word, #state{userlist = UserList} = State) ->
-	io:format("sendto dest user:[~p]~n", [DestUser]),
+handle_msg_sendto(Socket, DestUser, Word, #state{userlist = UserList,serverindex = ServerIndex} = State) ->
+	?TRACE("[server_userlist] sendto dest user:[~p]~n", [DestUser]),
+	UserName = find_username_by_socket(UserList, Socket),
 	case find_username_by_user(UserList, DestUser) of 
-		{find_user_invalid} -> [];
+		{find_user_invalid} ->
+			%若私聊的人不在自己进程中，在发射信息到黑板中
+			?TRACE("[server_userlist][~p] find_user_invalid!~n", [ServerIndex]),
+			Id = ets_control:insert_private_chat_record(UserName, DestUser, Word),
+			ServerUserList = ets_control:get_whole_server_userlist(),
+			ipc_control:rpc_private_chat_msg(ServerUserList, ServerIndex, Id),
+			ets_control:insert_msg_queue_record(?PRIVATE_CHAT_BLACKBOARD, ServerIndex, Id);
 		{ok, {_, PeerSocket, _}} ->
-			UserName = find_username_by_socket(UserList, Socket),
 			send_user_msg(PeerSocket, "[" ++ UserName ++ "]:" ++ Word)
 	end,
 	State.
 
+%正常业务则检测目标用户名是否在该进程中，是则直接转发
+rpc_handle_msg_sendto(NCRecordIndex,
+			#state{private_chat_record_index = PCRecordIndex,
+					userlist = UserList,
+			        serverindex = ServerIndex} = State) when PCRecordIndex < NCRecordIndex->
+
+	%?TRACE("[server_userlist] length:[~p]~n", [length(UserList)]),
+	case ets_control:get_private_chat_record_single(PCRecordIndex + 1) of
+		[{Id, UserName, DestUser, Word}] ->
+			case find_username_by_user(UserList, DestUser) of
+				{find_user_invalid} ->ok;
+				{ok, {_, PeerSocket, _}} ->
+					%?TRACE("[server_userlist] find DestUser~n"),
+					send_user_msg(PeerSocket, "[" ++ UserName ++ "]:" ++ Word)
+			end;
+		_ ->ok
+			%?TRACE("[server_userlist] rpc_private empty~n")
+	end,
+	rpc_handle_msg_sendto(NCRecordIndex,
+		State#state{private_chat_record_index = PCRecordIndex + 1});
+
+rpc_handle_msg_sendto(_NCRecordIndex, _State) ->
+	ok.
+
+
+
 handle_msg_offline(Socket, #state{userlist = UserList} = State) ->
 	UserName = find_username_by_socket(UserList, Socket),
-	io:format("Username:[~p] offline ~n", [UserName]),
+	?LOGINFO("[server_userlist] Username:[~p] offline ~n", [UserName]),
 	OnlineList = remove_socket(UserList, Socket, UserName),
 	State#state{userlist = OnlineList}.
 
@@ -241,7 +340,7 @@ handle_msg_modify_info(UserName, NewPassWord, Socket, ModifyInfo) ->
 	server_send_user_msg(Socket, Str).
 
 handle_msg_modify(UserName, NewPassWord, Socket, State) ->
-	io:format("[info] handle_msg_modify UserName[~p]  try to modify password~n", [UserName]),
+	?LOGINFO("[server_userlist] handle_msg_modify UserName[~p]  try to modify password~n", [UserName]),
 	case user_control:user_modify_module(UserName, NewPassWord) of
 		user_modify_success ->
 			handle_msg_modify_info(UserName, NewPassWord, Socket, "modify success!");
@@ -250,13 +349,25 @@ handle_msg_modify(UserName, NewPassWord, Socket, State) ->
 	end,
 	State.
 
-handle_msg_send_msg(Data, Socket, #state{userlist = UserList, chat_record_count = ChatRecordCount} = State) ->
-	io:format("recv msg:~p ~n", [Data]),
+handle_msg_send_msg(Data, Socket,
+	#state{userlist = UserList,
+			world_chat_record_index = WorldChatRecordIndex,
+			serverindex = ServerIndex} = State) ->
 	UserName = find_username_by_socket(UserList, Socket),
-	send_online_user_msg(UserList, Socket, UserName, Data),
-	UpdataChatRecordCount = ChatRecordCount + 1,
-	db_control:insert_chat_record(UpdataChatRecordCount, UserName, Data),
-	State#state{chat_record_count = UpdataChatRecordCount}.
+
+	%(1)插入新的记录在公共ets表中，并通过【ipc模块】通知其他进程读取数据
+	NewWorldChatRecordIndex = ets_control:insert_world_chat_record(UserName, Data),
+	ServerUserList = ets_control:get_whole_server_userlist(),
+	ipc_control:rpc_world_chat_msg(ServerUserList, ServerIndex, NewWorldChatRecordIndex),
+
+	?TRACE("[server_userlist][~p] insert new rd:~p ~n", [ServerIndex, NewWorldChatRecordIndex]),
+
+	%(2)遍历从ChatRecordIndex到UpdateChatRecordIndex所有信息，并转发给用户
+	send_online_user_msg(WorldChatRecordIndex, NewWorldChatRecordIndex, State),
+
+	%(3)更新自身进程到server_msg_queue，表示自身已处理数据
+	ets_control:insert_msg_queue_record(?WORLD_CHAT_BLACKBOARD, ServerIndex, NewWorldChatRecordIndex),
+	State#state{world_chat_record_index = NewWorldChatRecordIndex}.
 
 handle_msg_online(UserName, Socket, From, #state{userlist = UserList} = State) ->
 	NewState =
@@ -266,12 +377,12 @@ handle_msg_online(UserName, Socket, From, #state{userlist = UserList} = State) -
 				OnlineList = remove_socket(UserList, OldSocket, UserName),
 				ipc_control:kick_user(Pid, OldSocket),
 
-				io:format("[~p] login success! ~n", [UserName]),
+				?LOGINFO("[server_userlist] [~p] login success! ~n", [UserName]),
 				server_send_user_msg(Socket, UserName ++ " login success!"),
 				send_online_info(UserList, UserName),
 				State#state{userlist = [{From, Socket, UserName} | OnlineList]};
 			_ ->
-				io:format("[~p] login success! ~n", [UserName]),
+				?LOGINFO("[server_userlist] [~p] login success! ~n", [UserName]),
 				server_send_user_msg(Socket, UserName ++ " login success!"),
 				send_online_info(UserList, UserName),
 				State#state{userlist = [{From, Socket, UserName} | State#state.userlist]}
@@ -284,17 +395,16 @@ handle_msg_passwd_invalid(Socket, From, State) ->
 	ipc_control:user_password_invalid_to_socket(From, Socket),
 	State.
 
-handle_msg_login(UserName, PassWord, Socket, From, State) ->
-	io:format("UserName:~p Passwd:~p try to login! ~n", [UserName, PassWord]),
+handle_msg_login(UserName, PassWord, Socket, From, #state{serverindex = ServerIndex} = State) ->
+	?LOGINFO("[server_userlist]UserName:~p Passwd:~p try to login! ~n", [UserName, PassWord]),
 	NewState =
 		case user_control:user_login_module(UserName, PassWord) of
 			user_login_success ->
-				io:format("user_login_success~n"),
-				io:format("From:~p~n", [From]),
-				gen_server:cast(From, login_success),
+				?TRACE("[server_userlist][~p][~p] user_login_success~n", [ServerIndex, UserName]),
+				gen_server:cast(From, {login_success, UserName}),
 				handle_msg_online(UserName, Socket, From, State);
 			user_password_invalid ->
-				io:format("[info] user_password_invalid~n"),
+				?LOGINFO("[server_userlist] user_password_invalid~n"),
 				handle_msg_passwd_invalid(Socket, From, State)
 		end,
 	NewState.
@@ -345,17 +455,28 @@ send_online_info(List, UserName) ->
 	OutData = "[" ++ UserName ++ "]online!",
 	[gen_tcp:send(Socket, term_to_binary(OutData))||{_, Socket,_} <- List].
 
-%广播发送数据
-send_online_user_msg(List, Socket, UserName, Data) ->
-	OutData = "[" ++ UserName ++ "]:" ++ Data,
-	io:format("OutData:~p~n", [OutData]),
-	[gen_tcp:send(DestSocket, term_to_binary(OutData))||{_,DestSocket,_} <- List,DestSocket /= Socket].
+%广播发送数据,并且发送通知其他ServerUserList接收数据以及更新自身的记录到WORLD_CHAT_BLACKBOARD
+send_online_user_msg(ChatRecordIndex, ServerHandleCount,
+	#state{userlist = List} = State) when ChatRecordIndex < ServerHandleCount->
 
+	{_Id, UserName, Data} = ets_control:get_world_chat_record(ChatRecordIndex + 1),
+	OutData = "[" ++ UserName ++ "]:" ++ Data,
+	?LOGINFO("[server_userlist] OutData:~p~n", [OutData]),
+	[gen_tcp:send(DestSocket, term_to_binary(OutData))||{_,DestSocket,MUser} <- List,UserName /= MUser],
+	send_online_user_msg(ChatRecordIndex + 1, ServerHandleCount, State);
+
+send_online_user_msg(WorldChatRecordIndex, NewWorldChatRecordIndex, #state{serverindex = ServerIndex}) ->
+	if
+		WorldChatRecordIndex > NewWorldChatRecordIndex ->
+			ets_control:insert_msg_queue_record(?WORLD_CHAT_BLACKBOARD, ServerIndex, WorldChatRecordIndex);
+		true ->
+			ets_control:insert_msg_queue_record(?WORLD_CHAT_BLACKBOARD, ServerIndex, NewWorldChatRecordIndex)
+	end.
 %讨论组发送数据
-send_group_user_msg(GroupSocketList, Socket, GroupTitle, UserName, Word) ->
+send_group_user_msg(GroupSocketList, GroupTitle, UserName, Word) ->
 	OutData ="[" ++ GroupTitle ++ "]" ++ "[" ++ UserName ++ "]:" ++ Word,
-	io:format("OutData:~p~n", [OutData]),
-	[gen_tcp:send(DestSocket, term_to_binary(OutData))||{_, DestSocket, _} <- GroupSocketList,DestSocket /= Socket].
+	?LOGINFO("[server_userlist] OutData:~p~n", [OutData]),
+	[gen_tcp:send(DestSocket, term_to_binary(OutData))||{_, DestSocket, DestUserName} <- GroupSocketList,DestUserName /= UserName].
 
 
 %发送给指定用户
@@ -370,7 +491,7 @@ send_user_msg(Socket, Data) ->
 %移除下线的Socket
 remove_socket(List, Socket, UserName) ->
 	OutData = "[" ++ UserName ++ "]offline!",
-	io:format("Send info: ~p~n", [OutData]),
+	?LOGINFO("[server_userlist] Send info: ~p~n", [OutData]),
 	Filter = [{Pid, X, Node} || {Pid, X, Node} <- List, X /= Socket],
 	[gen_tcp:send(DestSocket, term_to_binary(OutData)) || {_, DestSocket, _} <- Filter],
 	Filter.

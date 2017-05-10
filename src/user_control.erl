@@ -13,8 +13,9 @@
 		%, user_login/2,user_modify/2
 		]).
 
+-include("mlogs.hrl").
 user_login_module(UserName, PassWord) ->
-	io:format("ets_user_login_module start~n"),
+	?LOGINFO("[user_control] user_login_module start~n"),
 	case user_login(UserName, PassWord) of
 
 		{user_login_success, _UserName, PassWord} ->
@@ -25,7 +26,7 @@ user_login_module(UserName, PassWord) ->
 	end.
 
 user_modify_module(UserName, NewPassWord) ->
-	io:format("ets_user_modify_module~n"),
+	?LOGINFO("[user_control] user_modify_module~n"),
 	case user_modify(UserName, NewPassWord) of
 		{user_modify_success, UserName, NewPassWord} ->
 			user_modify_success;
@@ -38,7 +39,7 @@ user_modify_module(UserName, NewPassWord) ->
 %用户登录
 user_login(UserName, PassWord) ->
 	%调用ets_controll模块查询用户是否存在，
-	io:format("user_control user_login~n"),
+	?LOGINFO("[user_control] user_login~n"),
 	case db_control:select_user_info_by_username(UserName) of
 		{user_find, {UserName, PassWord}}	->
 			{user_login_success, UserName, PassWord};
@@ -51,7 +52,7 @@ user_login(UserName, PassWord) ->
 %修改用户密码
 user_modify(UserName, PassWord) ->
 	%调用ets_controll模块查询用户是否存在，存在则修改密码
-	io:format("user_control user_modify UserName:~p, PassWord:~p ~n", [UserName, PassWord]),
+	?LOGINFO("[user_control] user_modify UserName:~p, PassWord:~p ~n", [UserName, PassWord]),
 	case db_control:select_user_info_by_username(UserName) of
 		{user_find, {UserName, _}}	->
 			db_control:update_user_passwd(UserName, PassWord),

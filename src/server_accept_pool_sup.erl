@@ -19,9 +19,11 @@
 
 %% ====================================================================
 init([]) ->
+	process_flag(trap_exit,true),
+	monitor(process, server_accept_pool_sup),
 	io:format("server_accept_pool_sup init ~n"),
     {ok,
-		{ {simple_one_for_one, 0, 1},
+		{ {simple_one_for_one, 1, 1},
 			[
 				{ server_accept_pool,
 					{server_accept_pool, start_link, []},

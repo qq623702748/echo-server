@@ -9,6 +9,7 @@
 -module(db_control).
 -author("zhuchaodi").
 -include("table_name_def.hrl").
+-include("mlogs.hrl").
 %% API
 -export([init/0, try_start/0, try_create_schema/0, try_create_table/0, init_group_info/0,select_all_group_info/0,select_all/4,
 	insert_new_record/2, read_record/2, get_last/1, insert_chat_record/3,
@@ -16,20 +17,21 @@
 	select_all_chat_record/0,
 	insert_user_info/2,update_user_passwd/2,select_user_info_by_username/1,
 	select_group_info_by_groupid/1,
-	update_group_info_by_groupid/1]).
+	update_group_info_by_groupid/1,
+	wait_for_tables/0]).
 
 init() ->
 	Ret = try_create_schema(),
 
 	case Ret of
 		ok ->
-			io:format("[db_control] [info] Mnesia schema start success!~n");
+			?LOGINFO("[db_control] Mnesia schema start success!~n");
 		error ->
-			io:format("[db_control] [info] Mnesia schema start failed!~n")
+			?LOGINFO("[db_control] Mnesia schema start failed!~n")
 	end,
 	try_start(),
 	try_create_table(),
-	io:format("[db_control] [info] Mnesia create table success!~n"),
+	?LOGINFO("[db_control] Mnesia create table success!~n"),
 	init_group_info().
 
 try_create_schema() ->
@@ -39,7 +41,7 @@ try_create_schema() ->
 			case Reason of
 				{_, {already_exists, _}} -> ok;
 				_ ->
-					io:format("[db_control] [info] Mnesia create_schema create failed ! Reason:~p~n", [Reason]),
+					?LOGINFO("[db_control] Mnesia create_schema create failed ! Reason:~p~n", [Reason]),
 					error
 			end;
 		_->
@@ -64,10 +66,10 @@ try_create_table() ->
  	end,
 	case mnesia:create_table(db_group_info, [{record_name, group_info_p}, {disc_copies, [node()]}, {attributes, record_info(fields, group_info_p)}]) of
 		{aborted,{already_exists,_}} ->
-			io:format("[db_control] [info] create db_group_info success~n"),
+			?LOGINFO("[db_control] create db_group_info success~n"),
 			ok;
 		Ret->
-			io:format("[db_control] [info] Ret:~p~n", [Ret]),
+			?LOGINFO("[db_control] Ret:~p~n", [Ret]),
 			error
 	end,
 	mnesia:wait_for_tables([db_world_chat_record, db_user_info, db_group_info], 2000).
@@ -75,14 +77,14 @@ try_create_table() ->
 init_group_info() ->
 	case select_all_group_info() of
 		empty ->
-			io:format("[db_control] [info] init_group_info: try to init group info~n"),
+			?LOGINFO("[db_control] init_group_info: try to init group info~n"),
 			GroupA = #group_info_p{gp_id = "001", gp_title = "groupA", gp_userlist = []},
 			GroupB = #group_info_p{gp_id = "002", gp_title = "groupB", gp_userlist = []},
-			io:format("[db_control] [info] GroupA :~p GroupB:~p~n", [GroupA, GroupB]),
+			?LOGINFO("[db_control] GroupA :~p GroupB:~p~n", [GroupA, GroupB]),
 			insert_new_record(db_group_info, GroupA),
 			insert_new_record(db_group_info, GroupB);
 		{not_empty,  QueryResult, RecordCount} ->
-			io:format("[db_control] [info] init_group_info: group info has already exists!~n QueryResult:~p , RecordCount~p ~n", [QueryResult, RecordCount])
+			?LOGINFO("[db_control] init_group_info: group info has already exists!~n QueryResult:~p , RecordCount~p ~n", [QueryResult, RecordCount])
 	end.
 
 
@@ -108,7 +110,7 @@ select_group_info_by_groupid(GroupId) ->
 			[#group_info_p{gp_id = GroupId} = GroupInfo] -> GroupInfo;
 			_ -> {group_empty}
 		end,
-	io:format("[db_control] [info] select_group_info_by_groupid Ret:~p~n", [Ret]),
+	?LOGINFO("[db_control] select_group_info_by_groupid Ret:~p~n", [Ret]),
 	Ret.
 update_group_info_by_groupid(NewGroupInfo) ->
 	insert_new_record(db_group_info, NewGroupInfo).
@@ -128,7 +130,7 @@ select_all_chat_record() ->
 
 
 insert_chat_record(Id, UserName, Data) ->
-	io:format("[db_control] [info] db_control try to insert_chat_record~n"),
+	?LOGINFO("[db_control] db_control try to insert_chat_record~n"),
 	Row = #chat_record_p{id = Id, username = UserName, word = Data},
 	insert_new_record(db_world_chat_record, Row).
 
@@ -157,12 +159,15 @@ get_size(TableName) ->
 
 select_all(TableName, MatchHead, Guard, Result) ->
 	QueryResult = mnesia:dirty_select(TableName, [{MatchHead, Guard, Result}]),
-	io:format("[db_control] [info] QueryResult:~p~n", [QueryResult]),
+	?LOGINFO("[db_control] QueryResult:~p~n", [QueryResult]),
 	case length(QueryResult) of
 		0 ->
-			io:format("[db_control] [info] empty~n"),
+			?LOGINFO("[db_control] empty~n"),
 			empty;
 		_->
-			io:format("[db_control] [info] not_empty QueryResult~n"),
+			?LOGINFO("[db_control] not_empty QueryResult~n"),
 			{not_empty, QueryResult, length(QueryResult)}
 	end.
+
+wait_for_tables() ->
+	mnesia:wait_for_tables([db_world_chat_record, db_user_info, db_group_info], 2000).

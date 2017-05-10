@@ -9,7 +9,7 @@
 %% ====================================================================
 %% API functions
 %% ====================================================================
--export([start_link/2, start_accept_pool/2]).
+-export([start_link/3, start_accept_pool/2, start_userlist_pool/1]).
 
 
 
@@ -19,7 +19,7 @@
 -record(state, {lsock}).
 
 %% ====================================================================
-init([Port, AcceptPool]) ->
+init([Port, AcceptPool, ServerUserListPool]) ->
 	io:format("server_listener init start..~n"),
 	process_flag(trap_exit, true),
 	Opts = [binary, {packet, 4}, {reuseaddr, true},
@@ -34,6 +34,8 @@ init([Port, AcceptPool]) ->
 		end,
 	io:format("========server_listener ready to start accept pool~n"),
  	start_accept_pool(State#state.lsock, AcceptPool),
+	io:format("========server_listener ready to start userlist pool~n"),
+	start_userlist_pool(ServerUserListPool),
 	{ok, State}.
 
 %% ====================================================================
@@ -61,12 +63,18 @@ code_change(_OldVsn, State, _Extra) ->
 %% ====================================================================
 %% Internal functions
 %% ====================================================================
-start_link(Port, AcceptPool)->
+start_link(Port, AcceptPool, ServerUserListPool)->
 	io:format("server_listener start_link~n"),
-	gen_server:start_link({local, ?MODULE}, ?MODULE, [Port, AcceptPool],[]).
+	gen_server:start_link({local, ?MODULE}, ?MODULE, [Port, AcceptPool, ServerUserListPool],[]).
 
 start_accept_pool(LSock, AcceptCnt) when AcceptCnt > 0 ->
 	server_accept_pool_sup:start_child(LSock, AcceptCnt),
 	start_accept_pool(LSock, AcceptCnt - 1);
 start_accept_pool(_LSock, AcceptCnt) when AcceptCnt =:= 0 ->
+	[].
+
+start_userlist_pool(ServerUserListPoolCnt) when ServerUserListPoolCnt > 0 ->
+	server_userlist_sup:start_child(ServerUserListPoolCnt),
+	start_userlist_pool(ServerUserListPoolCnt - 1);
+start_userlist_pool(ServerUserListPoolCnt) when ServerUserListPoolCnt =:= 0 ->
 	[].
