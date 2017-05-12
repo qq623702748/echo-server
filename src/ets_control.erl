@@ -29,14 +29,14 @@
 	clean_world_chat_msg/0,
 	loop_delete_msg/3,
 
-	get_world_chat_record/1]).
+	get_world_chat_record/2]).
 
 
 
 %%所有对于ETS表的操作均放在此文件中
 
 create_server_userlist_mapper() ->
-	ets:new(?SERVERMAPPER, [public, bag, named_table]),%创建服务器映射表
+	ets:new(?SERVERMAPPER, [public, bag, named_table, {read_concurrency, true}]),%创建服务器映射表
 	io:format("create table success , table name:~p~n", [?SERVERMAPPER]),
 	?SERVERMAPPER.
 
@@ -48,19 +48,19 @@ create_server_msg_queue_blackboard(LastChatIndex) ->
 	?MSG_QUEUE_BLACKBOARD.
 
 create_server_world_chat_blackboard(LastChatIndex) ->
-	ets:new(?WORLD_CHAT_BLACKBOARD, [public, set, named_table]), %创建服务器公共黑板
+	ets:new(?WORLD_CHAT_BLACKBOARD, [public, set, named_table, {read_concurrency, true}]), %创建服务器公共黑板
 	io:format("create table success , table name:~p~n", [?WORLD_CHAT_BLACKBOARD]),
 	ets:insert(?WORLD_CHAT_BLACKBOARD, {seq, LastChatIndex}),
 	?WORLD_CHAT_BLACKBOARD.
 
 create_server_private_chat_blackboard(LastChatIndex) ->
-	ets:new(?PRIVATE_CHAT_BLACKBOARD, [public, set, named_table]), %创建服务器公共黑板
+	ets:new(?PRIVATE_CHAT_BLACKBOARD, [public, set, named_table, {read_concurrency, true}]), %创建服务器公共黑板
 	io:format("create table success , table name:~p~n", [?PRIVATE_CHAT_BLACKBOARD]),
 	ets:insert(?PRIVATE_CHAT_BLACKBOARD, {seq, LastChatIndex}),
 	?PRIVATE_CHAT_BLACKBOARD.
 
 create_server_group_chat_blackboard(LastChatIndex) ->
-	ets:new(?GROUP_CHAT_BLACKBOARD, [public, set, named_table]), %创建服务器公共黑板
+	ets:new(?GROUP_CHAT_BLACKBOARD, [public, set, named_table, {read_concurrency, true}]), %创建服务器公共黑板
 	io:format("create table success , table name:~p~n", [?GROUP_CHAT_BLACKBOARD]),
 	ets:insert(?GROUP_CHAT_BLACKBOARD, {seq001, LastChatIndex}),
 	ets:insert(?GROUP_CHAT_BLACKBOARD, {seq002, LastChatIndex}),
@@ -168,12 +168,27 @@ loop_insert_world_chat_record(PrevHandleIndex, NewHandleIndex)
 loop_insert_world_chat_record(_PrevHandleIndex, _NewHandleIndex) -> ok.
 
 loop_delete_msg(TableName, PrevHandle, DelIndex) when PrevHandle =< DelIndex->
-	%?TRACE("[ets_control] ready to delete [~p]~n", [PrevHandle]),
+	?TRACE("[ets_control] ready to delete [~p]~n", [PrevHandle]),
 	ets:delete(TableName, PrevHandle),
 	loop_delete_msg(TableName, PrevHandle + 1, DelIndex);
 loop_delete_msg(TableName, _PrevHandle, DelIndex) ->
 	ets:insert(?MSG_QUEUE_BLACKBOARD, {prev_handle_seq, DelIndex}).
 
-get_world_chat_record(Id) ->
-	[Ret] = ets:lookup(?WORLD_CHAT_BLACKBOARD, Id) ,
-	Ret.
+get_world_chat_record(Id, TryLoopCnt) when TryLoopCnt > 0->
+	Result = case ets:lookup(?WORLD_CHAT_BLACKBOARD, Id) of
+		[Ret] ->
+			Ret;
+		Error->
+			io:format("[~p] recordID:~p orrured error:~p try again! Cnt:~p ~n", [?WORLD_CHAT_BLACKBOARD, Id, Error, 20-TryLoopCnt+1]),
+			get_world_chat_record(Id, TryLoopCnt - 1)
+	end,
+	Result;
+get_world_chat_record(Id, _TryLoopCnt) ->
+	io:format("Record Id:~p give up!~n", [Id]),
+	{Id, "Error", "Record error to get"}.
+
+sleep(TimeOut) ->
+	receive
+		after 1000 ->
+			ok
+	end.

@@ -80,6 +80,7 @@ init([ServerIndex]) ->
 	ets_control:add_new_server_userlist_mapper(ServerIndex, self()),
 	db_control:wait_for_tables(),
 	WorldChatRecordCountIndex = db_control:get_chat_record_size(),
+	server_chat_cache:cache_init(WorldChatRecordCountIndex),
 	ets_control:insert_msg_queue_record(?WORLD_CHAT_BLACKBOARD, ServerIndex, WorldChatRecordCountIndex),
 	ets_control:insert_msg_queue_record(?PRIVATE_CHAT_BLACKBOARD, ServerIndex, 0),
 	{ok, #state{world_chat_record_index = WorldChatRecordCountIndex, private_chat_record_index = 0, serverindex = ServerIndex, group_chat_record_index = 0}}.
@@ -103,11 +104,19 @@ handle_cast(get_process_info, State) ->
 handle_cast({rpc_world_chat_record, NewWorldChatRecordIndex},
 			#state{world_chat_record_index = WorldChatRecordIndex,
 					serverindex = ServerIndex} = State) ->
-	%遍历从ChatRecordIndex到UpdateChatRecordIndex所有信息，并转发给用户
-	?TRACE("[server_userlist] rpc_world_chat_record NewWorldChatRecordIndex[~p]~n", [NewWorldChatRecordIndex]),
-	send_online_user_msg(WorldChatRecordIndex, NewWorldChatRecordIndex, State),
-	ets_control:insert_msg_queue_record(?WORLD_CHAT_BLACKBOARD, ServerIndex, NewWorldChatRecordIndex),
-	{noreply, State#state{world_chat_record_index = NewWorldChatRecordIndex}};
+
+	?TRACE("[server_userlist][~p] rpc_world_chat_record Index[~p] NewIndex[~p]~n", [ServerIndex, WorldChatRecordIndex, NewWorldChatRecordIndex]),
+
+	%(1)将异步收到的数据加入缓存中
+	server_chat_cache:add_cache(NewWorldChatRecordIndex),
+	%(2)读取最长可转发序列区间
+	{WorldChatRecordIndex, MaxSendMsgIndex} = server_chat_cache:get_cache_continuous_sequence(ServerIndex),
+	%(3)转发数据
+	send_online_user_msg(WorldChatRecordIndex, MaxSendMsgIndex, State),
+	%(4)删除已转发数据，并插入消息队列，已处理记录
+	server_chat_cache:del_cache(ServerIndex, WorldChatRecordIndex, MaxSendMsgIndex),
+	ets_control:insert_msg_queue_record(?WORLD_CHAT_BLACKBOARD, ServerIndex, MaxSendMsgIndex),
+	{noreply, State#state{world_chat_record_index = MaxSendMsgIndex}};
 
 %rpc_private_chat_record在ipc_control中定义，用于进程间通知消息已存储到ets中
 handle_cast({rpc_private_chat_record, NewPrivateChatRecordIndex},
@@ -353,21 +362,31 @@ handle_msg_send_msg(Data, Socket,
 	#state{userlist = UserList,
 			world_chat_record_index = WorldChatRecordIndex,
 			serverindex = ServerIndex} = State) ->
+
 	UserName = find_username_by_socket(UserList, Socket),
 
-	%(1)插入新的记录在公共ets表中，并通过【ipc模块】通知其他进程读取数据
+	%(1)插入新的记录在公共ets表中，并获取插入数据后的ID值
 	NewWorldChatRecordIndex = ets_control:insert_world_chat_record(UserName, Data),
+
+	%(2)新插入记录加入聊天缓存中，表示此数据可读
+	server_chat_cache:add_cache(NewWorldChatRecordIndex),
+
+	%(3)通过【ipc模块】通知其他进程读取数据
+	?TRACE("[server_userlist][~p] insert new rd:~p ~n", [ServerIndex, NewWorldChatRecordIndex]),
 	ServerUserList = ets_control:get_whole_server_userlist(),
 	ipc_control:rpc_world_chat_msg(ServerUserList, ServerIndex, NewWorldChatRecordIndex),
 
-	?TRACE("[server_userlist][~p] insert new rd:~p ~n", [ServerIndex, NewWorldChatRecordIndex]),
 
-	%(2)遍历从ChatRecordIndex到UpdateChatRecordIndex所有信息，并转发给用户
-	send_online_user_msg(WorldChatRecordIndex, NewWorldChatRecordIndex, State),
+	%(4)从server_chat_cache缓存中遍历最长连续序列，并转发给用户,因为insert和cast存在不同步问题，必须要检测哪些数据可以转发
+	{MinIndex, MaxSendMsgIndex} = server_chat_cache:get_cache_continuous_sequence(ServerIndex),
+	?TRACE("[server_userlist][~p] cache:~p ~n", [ServerIndex, get(cache)]),
+	server_chat_cache:del_cache(ServerIndex, MinIndex, MaxSendMsgIndex),
+	send_online_user_msg(WorldChatRecordIndex, MaxSendMsgIndex, State),
 
-	%(3)更新自身进程到server_msg_queue，表示自身已处理数据
-	ets_control:insert_msg_queue_record(?WORLD_CHAT_BLACKBOARD, ServerIndex, NewWorldChatRecordIndex),
-	State#state{world_chat_record_index = NewWorldChatRecordIndex}.
+	%(4)更新自身进程到server_msg_queue，表示自身已处理数据
+	ets_control:insert_msg_queue_record(?WORLD_CHAT_BLACKBOARD, ServerIndex, MaxSendMsgIndex),
+	?TRACE("[server_userlist][~p] MaxSendMsgIndex:~p ~n", [ServerIndex, MaxSendMsgIndex]),
+	State#state{world_chat_record_index = MaxSendMsgIndex}.
 
 handle_msg_online(UserName, Socket, From, #state{userlist = UserList} = State) ->
 	NewState =
@@ -400,7 +419,7 @@ handle_msg_login(UserName, PassWord, Socket, From, #state{serverindex = ServerIn
 	NewState =
 		case user_control:user_login_module(UserName, PassWord) of
 			user_login_success ->
-				?TRACE("[server_userlist][~p][~p] user_login_success~n", [ServerIndex, UserName]),
+				?LOGINFO("[server_userlist][~p][~p] user_login_success~n", [ServerIndex, UserName]),
 				gen_server:cast(From, {login_success, UserName}),
 				handle_msg_online(UserName, Socket, From, State);
 			user_password_invalid ->
@@ -459,7 +478,9 @@ send_online_info(List, UserName) ->
 send_online_user_msg(ChatRecordIndex, ServerHandleCount,
 	#state{userlist = List} = State) when ChatRecordIndex < ServerHandleCount->
 
-	{_Id, UserName, Data} = ets_control:get_world_chat_record(ChatRecordIndex + 1),
+
+	{_Id, UserName, Data} = ets_control:get_world_chat_record(ChatRecordIndex + 1, 1),
+
 	OutData = "[" ++ UserName ++ "]:" ++ Data,
 	?LOGINFO("[server_userlist] OutData:~p~n", [OutData]),
 	[gen_tcp:send(DestSocket, term_to_binary(OutData))||{_,DestSocket,MUser} <- List,UserName /= MUser],
