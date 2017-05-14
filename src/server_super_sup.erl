@@ -10,18 +10,18 @@
 %% ====================================================================
 %% API functions
 %% ====================================================================
--export([start_link/3]).
+-export([start_link/4]).
 
 
 
 %% ====================================================================
 %% Behavioural functions
 %% ====================================================================
-start_link(Port, AcceptPool, ServerUserListPool) ->
+start_link(Port, AcceptPool, ServerUserListPool, ServerLoginPool) ->
 	io:format("server_super_sup start link~n"),
-	supervisor:start_link({local, ?SERVER}, ?MODULE, [Port, AcceptPool,ServerUserListPool]).
+	supervisor:start_link({local, ?SERVER}, ?MODULE, [Port, AcceptPool,ServerUserListPool, ServerLoginPool]).
 %% ====================================================================
-init([Port, AcceptPool, ServerUserListPool]) ->
+init([Port, AcceptPool, ServerUserListPool, ServerLoginPool]) ->
 	io:format("server_super_sup init pid:~p ~n", [self()]),
     {ok,
 
@@ -60,9 +60,17 @@ init([Port, AcceptPool, ServerUserListPool]) ->
 					supervisor,
 					[server_userlist_sup]
 				},
+				% login
+				{ server_login_pool_sup,
+					{supervisor, start_link, [{local, server_login_pool_sup}, server_login_pool_sup, []]},
+					permanent,
+					2000,
+					supervisor,
+					[server_login_pool_sup]
+				},
 				% server_listener
 				{ server_listener,
-					{server_listener, start_link, [Port, AcceptPool, ServerUserListPool]},
+					{server_listener, start_link, [Port, AcceptPool, ServerUserListPool, ServerLoginPool]},
 					permanent,
 					2000,
 					worker,
@@ -84,4 +92,3 @@ init([Port, AcceptPool, ServerUserListPool]) ->
 %% ====================================================================
 %% Internal functions
 %% ====================================================================
-

@@ -129,4 +129,3 @@ rpc_group_chat_msg(ServerUserList, SelfServerIndex, GroupId, NewGroupChatRecordI
 
 	[gen_server:cast(ServerPid, {rpc_group_chat_record, GroupId, NewGroupChatRecordIndex})
 		|| {ServerIndex, ServerPid}<-ServerUserList, ServerIndex=/=SelfServerIndex].
-

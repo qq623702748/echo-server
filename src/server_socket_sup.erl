@@ -42,4 +42,3 @@ init([]) ->
 start_child(Socket) ->
  	?LOGINFO("[server_socket_sup] start_child ~n"),
 	supervisor:start_child(server_socket_sup, [Socket]).
-

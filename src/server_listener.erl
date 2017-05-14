@@ -4,12 +4,12 @@
 
 -module(server_listener).
 -behaviour(gen_server).
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3, start_login_pool/1]).
 
 %% ====================================================================
 %% API functions
 %% ====================================================================
--export([start_link/3, start_accept_pool/2, start_userlist_pool/1]).
+-export([start_link/4, start_accept_pool/2, start_userlist_pool/1]).
 
 
 
@@ -19,7 +19,7 @@
 -record(state, {lsock}).
 
 %% ====================================================================
-init([Port, AcceptPool, ServerUserListPool]) ->
+init([Port, AcceptPool, ServerUserListPool, ServerLoginPool]) ->
 	io:format("server_listener init start..~n"),
 	process_flag(trap_exit, true),
 	Opts = [binary, {packet, 4}, {reuseaddr, true},
@@ -36,6 +36,8 @@ init([Port, AcceptPool, ServerUserListPool]) ->
  	start_accept_pool(State#state.lsock, AcceptPool),
 	io:format("========server_listener ready to start userlist pool~n"),
 	start_userlist_pool(ServerUserListPool),
+	io:format("========server_listener ready to start login pool~n"),
+	start_login_pool(ServerUserListPool),
 	{ok, State}.
 
 %% ====================================================================
@@ -63,9 +65,9 @@ code_change(_OldVsn, State, _Extra) ->
 %% ====================================================================
 %% Internal functions
 %% ====================================================================
-start_link(Port, AcceptPool, ServerUserListPool)->
+start_link(Port, AcceptPool, ServerUserListPool, ServerLoginPoolCnt)->
 	io:format("server_listener start_link~n"),
-	gen_server:start_link({local, ?MODULE}, ?MODULE, [Port, AcceptPool, ServerUserListPool],[]).
+	gen_server:start_link({local, ?MODULE}, ?MODULE, [Port, AcceptPool, ServerUserListPool, ServerLoginPoolCnt],[]).
 
 start_accept_pool(LSock, AcceptCnt) when AcceptCnt > 0 ->
 	server_accept_pool_sup:start_child(LSock, AcceptCnt),
@@ -77,4 +79,10 @@ start_userlist_pool(ServerUserListPoolCnt) when ServerUserListPoolCnt > 0 ->
 	server_userlist_sup:start_child(ServerUserListPoolCnt),
 	start_userlist_pool(ServerUserListPoolCnt - 1);
 start_userlist_pool(ServerUserListPoolCnt) when ServerUserListPoolCnt =:= 0 ->
+	[].
+
+start_login_pool(ServerLoginPoolCnt) when ServerLoginPoolCnt > 0 ->
+	server_login_pool_sup:start_child(ServerLoginPoolCnt),
+	start_login_pool(ServerLoginPoolCnt - 1);
+start_login_pool(ServerLoginPoolCnt) when ServerLoginPoolCnt =:= 0 ->
 	[].

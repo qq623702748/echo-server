@@ -11,6 +11,7 @@
 			server_socket, server_socket_sup,
 			server_super_sup,
 			server_userlist, server_userlist_sup,
+			server_login_pool,server_login_pool_sup,
 			user_control]},
 		{registered,[server_app]},
 		{mod,{server_app,[]}},

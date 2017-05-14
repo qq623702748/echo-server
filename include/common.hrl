@@ -1,6 +1,7 @@
 -define(PORT, 9527).	%服务器指定端口值
 -define(ACCEPTPOOL, 2).%socket连接池大小
 -define(SERVERUSERLISTPOOL, 2). %定义serverUserList连接池大小
+-define(SERVERLOGINPOOL, 2). %定义serverloginpool连接池大小
 
 -define(SERVERMAPPER, server_mapper).
 -define(HASHFACTOR,31).
