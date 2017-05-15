@@ -17,20 +17,20 @@
 %% ====================================================================
 %% Behavioural functions
 %% ====================================================================
--record(state, {username, socket, status, limitlist = [], serverpid}).
+-record(state, {username, socket, status, limitlist = [], serveruserpid, serverloginpid}).
 -include("mlogs.hrl").
 -include("common.hrl").
 %% init/1
 init([Socket]) ->
 	?LOGINFO("[server_socket] start.. Socket[~p] .. ~n", [Socket]),
-    inet:setopts(Socket, [{active, once}]),
+	inet:setopts(Socket, [{active, once}]),
 	State = #state{socket = Socket, status = ?WAIT_FOR_LOGIN},
-    {ok, State}.
+	{ok, State}.
 
 
 %% handle_call/3
 handle_call(_Request, _From, State) ->
-    {reply, ok, State}.
+	{reply, ok, State}.
 
 
 %% handle_cast/2
@@ -48,63 +48,66 @@ handle_cast(user_password_invalid, #state{socket = Socket} = State) ->
 	gen_tcp:close(Socket),
 	{noreply, State};
 handle_cast(_Msg, State) ->
-    {noreply, State}.
+	{noreply, State}.
 
 
 %% handle_info/2
-handle_info({tcp, Socket, Bin}, #state{serverpid = ServerPid} = State) ->
+handle_info({tcp, Socket, Bin}, #state{serverloginpid = ServerLoginPid} = State) ->
 	inet:setopts(Socket, [{active, once}]),
 	Data = binary_to_term(Bin),
-	%?TRACE("[server_socket] recv data tcp ~p~n", [Data]),
+	?TRACE("[server_socket] recv data tcp ~p~n", [Data]),
 
 	NewState = case Data of
-		{heart_beat_req, Cnt} ->
-			%心跳包响应
-			case ipc_control:heart_beat_info(ServerPid, Socket, Cnt) of
-				socket_closed ->
-					gen_tcp:close(Socket);
-				ok->
-					ok
-			end,
-			State;
-		{login, UserName, PassWord} ->
-			%登录请求不需要拦截处理
-			UserNameHash = user_hash_mapper:hash(UserName),
-			MatchServerPid = ets_control:get_server_userlist_by_hash(UserNameHash),
-			gen_server:cast(MatchServerPid, {self(), Socket, Data}),
-			State#state{serverpid = MatchServerPid, username = UserName};
-		_-> 
-			handle_limit_word(Socket, Data, State)
-	end,
+				   {heart_beat_req, Cnt} ->
+					   %心跳包响应
+					   case ipc_control:heart_beat_info(ServerLoginPid, Socket, Cnt) of
+						   socket_closed ->
+							   gen_tcp:close(Socket);
+						   ok->
+							   ok
+					   end,
+					   State;
+				   {login, UserName, PassWord} ->
+					   %登录请求不需要拦截处理
+					   UserNameHash = user_hash_mapper:hash(UserName),
+					   %MatchServerPid = ets_control:get_server_userlist_by_hash(UserNameHash),
+					   MatchServerLoginPid = ets_control:get_server_login_by_hash(UserNameHash),
+					   MatchServerUserPid = ets_control:get_server_userlist_by_hash(UserNameHash),
+					   ?TRACE("MatchServerPid:[~p]~n", [MatchServerLoginPid]),
+					   gen_server:cast(MatchServerLoginPid, {self(), Socket, Data}),
+					   State#state{serverloginpid = MatchServerLoginPid, serveruserpid = MatchServerUserPid, username = UserName};
+				   _->
+					   handle_limit_word(Socket, Data, State)
+			   end,
 	{noreply, NewState, ?Timeout};
 
-handle_info({tcp_closed, Socket}, #state{status = Status, serverpid = ServerPid} = State) ->
-    ?LOGINFO("[server_socket] info ~p clent disconnected ~n", [self()]),
+handle_info({tcp_closed, Socket}, #state{status = Status, serveruserpid = ServerUserPid, serverloginpid = ServerLoginPid} = State) ->
+	?LOGINFO("[server_socket] info ~p clent disconnected ~n", [self()]),
 	case Status of
 		?LOGIN ->
-			gen_server:cast(ServerPid, {offline, Socket});
+			gen_server:cast(ServerUserPid, {offline, Socket});
 		_->
 			ok
 	end,
 	gen_tcp:close(Socket),
-    {stop, normal, State};
+	{stop, normal, State};
 
 handle_info(timeout, State) ->
-    ?LOGINFO("[server_socket] info ~p client connection timeout~n", [self()]),
-    {stop, normal, State};
+	?LOGINFO("[server_socket] info ~p client connection timeout~n", [self()]),
+	{stop, normal, State};
 
 handle_info(_Info, State) ->
-    {noreply, State}.
+	{noreply, State}.
 
 
 %% terminate/2
 terminate(_Reason, _State) ->
-    ok.
+	ok.
 
 
 %% code_change/3
 code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
+	{ok, State}.
 
 
 %% ====================================================================
@@ -112,51 +115,51 @@ code_change(_OldVsn, State, _Extra) ->
 %% ====================================================================
 
 start_link(Socket) ->
-    ?LOGINFO("[server_socket] start_link~n"),
-    gen_server:start_link(?MODULE, [Socket], []).
+	?LOGINFO("[server_socket] start_link~n"),
+	gen_server:start_link(?MODULE, [Socket], []).
 
 %限制一分钟最多发送50条信息
-handle_limit_word(Socket, Data, #state{limitlist = LimitList, status = Status, serverpid = ServerPid} = State)
-				when Status =:= ?LOGIN, ServerPid =/= undefined->
-	NewState = 
-	case Data of
-		{sendto, _DestUserName, _Word} ->
-			NewLimitList = 
-			case ipc_control:insert_time_stamp(LimitList) of
-			{ok, NextLimitList} ->
-				gen_server:cast(ServerPid, {self(), Socket, Data}),
-				NextLimitList;
-			{failed, NextLimitList} ->
-				?LOGINFO("[server_socket] out of limit~n"),
-				NextLimitList
-			end,
-			State#state{limitlist = NewLimitList};
-		{send_msg, _SendData} ->
-			NewLimitList = 
-			case ipc_control:insert_time_stamp(LimitList) of
-			{ok, NextLimitList} ->
-				gen_server:cast(ServerPid, {self(), Socket, Data}),
-				NextLimitList;
-			{failed, NextLimitList} ->
-				?LOGINFO("[server_socket] out of limit~n"),
-				NextLimitList
-			end,
-			State#state{limitlist = NewLimitList};
-		{enter_group, _GroupId} ->
-			NewLimitList = 
-			case ipc_control:insert_time_stamp(LimitList) of
-			{ok, NextLimitList} ->
-				gen_server:cast(ServerPid, {self(), Socket, Data}),
-				NextLimitList;
-			{failed, NextLimitList} ->
-				?LOGINFO("[server_socket] out of limit~n"),
-				NextLimitList
-			end,
-			State#state{limitlist = NewLimitList};
-		_->
-			gen_server:cast(ServerPid, {self(), Socket, Data}),
-			State#state{limitlist = LimitList}
-	end,
+handle_limit_word(Socket, Data, #state{limitlist = LimitList, status = Status, serveruserpid = ServerUserPid} = State)
+	when Status =:= ?LOGIN, ServerUserPid =/= undefined->
+	NewState =
+		case Data of
+			{sendto, _DestUserName, _Word} ->
+				NewLimitList =
+					case ipc_control:insert_time_stamp(LimitList) of
+						{ok, NextLimitList} ->
+							gen_server:cast(ServerUserPid, {self(), Socket, Data}),
+							NextLimitList;
+						{failed, NextLimitList} ->
+							?LOGINFO("[server_socket] out of limit~n"),
+							NextLimitList
+					end,
+				State#state{limitlist = NewLimitList};
+			{send_msg, _SendData} ->
+				NewLimitList =
+					case ipc_control:insert_time_stamp(LimitList) of
+						{ok, NextLimitList} ->
+							gen_server:cast(ServerUserPid, {self(), Socket, Data}),
+							NextLimitList;
+						{failed, NextLimitList} ->
+							?LOGINFO("[server_socket] out of limit~n"),
+							NextLimitList
+					end,
+				State#state{limitlist = NewLimitList};
+			{enter_group, _GroupId} ->
+				NewLimitList =
+					case ipc_control:insert_time_stamp(LimitList) of
+						{ok, NextLimitList} ->
+							gen_server:cast(ServerUserPid, {self(), Socket, Data}),
+							NextLimitList;
+						{failed, NextLimitList} ->
+							?LOGINFO("[server_socket] out of limit~n"),
+							NextLimitList
+					end,
+				State#state{limitlist = NewLimitList};
+			_->
+				gen_server:cast(ServerUserPid, {self(), Socket, Data}),
+				State#state{limitlist = LimitList}
+		end,
 	NewState;
 
 handle_limit_word(_Socket, _Data, State) ->

@@ -37,7 +37,7 @@ init([Port, AcceptPool, ServerUserListPool, ServerLoginPool]) ->
 	io:format("========server_listener ready to start userlist pool~n"),
 	start_userlist_pool(ServerUserListPool),
 	io:format("========server_listener ready to start login pool~n"),
-	start_login_pool(ServerUserListPool),
+	start_login_pool(ServerLoginPool),
 	{ok, State}.
 
 %% ====================================================================

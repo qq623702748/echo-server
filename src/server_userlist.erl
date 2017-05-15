@@ -136,6 +136,10 @@ handle_cast({rpc_group_chat_record, GroupId, NewGroupChatRecordIndex},
 	ets_control:insert_msg_queue_record(?GROUP_CHAT_BLACKBOARD, ServerIndex, NewGroupChatRecordIndex),
 	{noreply, State#state{group_chat_record_index = NewGroupChatRecordIndex}};
 
+handle_cast({login_success, From, Socket, UserName}, #state{userlist = UserList} = State) ->
+	NewState = State#state{userlist = [{From, Socket, UserName} |UserList]},
+	{noreply, NewState};
+
 %处理各个server_socket返回的tcp数据
 handle_cast({SocketPid, Socket, Data}, State) ->
 	?LOGINFO("[server_userlist] handle_cast State:[~p]~n", [State]),

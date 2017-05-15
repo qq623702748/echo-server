@@ -13,10 +13,14 @@
 %% API
 -export([create_server_userlist_mapper/0,
 	add_new_server_userlist_mapper/2,
+	add_new_server_login_mapper/2,
+	get_server_login_by_hash/1,
 	get_server_userlist_by_hash/1,
+	get_server_userlist_by_index/1,
 	get_whole_server_userlist/0,
 	get_private_chat_record_single/1,
 	get_group_chat_record_single/1,
+	create_server_login_mapper/0,
 	create_server_msg_queue_blackboard/1,
 	create_server_world_chat_blackboard/1,
 	create_server_private_chat_blackboard/1,
@@ -37,6 +41,11 @@
 
 create_server_userlist_mapper() ->
 	ets:new(?SERVERMAPPER, [public, bag, named_table, {read_concurrency, true}]),%创建服务器映射表
+	io:format("create table success , table name:~p~n", [?SERVERMAPPER]),
+	?SERVERMAPPER.
+
+create_server_login_mapper() ->
+	ets:new(?SERVERLOGINMAPPER, [public, bag, named_table, {read_concurrency, true}]),%创建服务器映射表
 	io:format("create table success , table name:~p~n", [?SERVERMAPPER]),
 	?SERVERMAPPER.
 
@@ -100,7 +109,20 @@ add_new_server_userlist_mapper(ServerIndex, ServerPid) ->
 	io:format("add new mapper ServerIndex:[~p], ServerPid:[~p]~n", [ServerIndex, ServerPid]),
 	ets:insert(?SERVERMAPPER, {ServerIndex, ServerPid}).
 
+add_new_server_login_mapper(ServerIndex, ServerPid) ->
+	io:format("add new login mapper ServerIndex:[~p], ServerPid:[~p]~n", [ServerIndex, ServerPid]),
+	ets:insert(?SERVERLOGINMAPPER, {ServerIndex, ServerPid}).
 
+
+
+get_server_login_by_hash(HashCode) when is_integer(HashCode)->
+	ServerIndex = HashCode rem ?SERVERLOGINPOOL + 1,
+	[{ServerIndex, ServerPid}] = ets:lookup(?SERVERLOGINMAPPER, ServerIndex),
+	ServerPid.
+
+get_server_userlist_by_index(ServerIndex) when ServerIndex > 0->
+	[{ServerIndex, ServerPid}] = ets:lookup(?SERVERMAPPER, ServerIndex),
+	ServerPid.
 
 get_server_userlist_by_hash(HashCode) when is_integer(HashCode)->
 	ServerIndex = HashCode rem ?SERVERUSERLISTPOOL + 1,
@@ -168,7 +190,7 @@ loop_insert_world_chat_record(PrevHandleIndex, NewHandleIndex)
 loop_insert_world_chat_record(_PrevHandleIndex, _NewHandleIndex) -> ok.
 
 loop_delete_msg(TableName, PrevHandle, DelIndex) when PrevHandle =< DelIndex->
-	?TRACE("[ets_control] ready to delete [~p]~n", [PrevHandle]),
+	%?TRACE("[ets_control] ready to delete [~p]~n", [PrevHandle]),
 	ets:delete(TableName, PrevHandle),
 	loop_delete_msg(TableName, PrevHandle + 1, DelIndex);
 loop_delete_msg(TableName, _PrevHandle, DelIndex) ->
